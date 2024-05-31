@@ -3,32 +3,39 @@ const traverse = require('@babel/traverse').default
 const { parse: vueParser } = require('vue-eslint-parser')
 const postcssNested = require('postcss-nested')
 const postcssComment = require('postcss-comment')
-const cssNext = require('postcss-cssnext')
+// const cssNext = require('postcss-cssnext')
 const postcss = require('postcss')
-var htmlParser = require('node-html-parser');
+const { parse: htmlParser } = require('parse5')
 const fs = require('fs')
 const path = require('path')
+const generateCodeWithComment = require('./generateCodeWithComment').default
+const getCodellocLine = require('./getCodellocLine').default
+
+enum CommentType {
+  'line' = 'line',
+  'block' = 'block'
+}
 
 interface CommentItemType {
   startIndex: number;
   endIndex: number;
   lineCount: number;
-  commentFlag: 'line' | 'block'
+  commentFlag: CommentType;
+  value: string;
   loc?: {
     start: {
-      line: number;
-    };
+      line: number
+    },
     end: {
-      line: number;
-    };
-  },
-  value: string;
+      line: number
+    }
+  }
 }
 
 enum CommentLanguageType {
-  'zh',
-  'en',
-  'zhen'
+  'zh' = 'zh',
+  'en' = 'en',
+  'zhen' = 'zhen'
 }
 
 interface CommentMsgType {
@@ -39,15 +46,18 @@ interface CommentMsgType {
     len: number;
     startIndex: number;
     endIndex: number;
-    commentFlag: 'line' | 'block'
-  }[]
+    commentFlag: CommentType,
+    value: string;
+  }[];
+  totalCodeLine: number;
 }
 
 interface OptionsType {
   onlyAllowZh?: boolean;
   zhPreNum?: number;
   skipDir?: string[];
-  pathExtArr?: string[];
+  showError?: boolean;
+  fileLineThreshold?: number;
 }
 
 // 计算不同文件类型相关注释密度的映射对象
@@ -115,7 +125,7 @@ function countCommentForJs(fileContent: string): Promise<CommentItemType[]> {
                 startIndex: start.line,
                 endIndex: end.line,
                 lineCount: end.line - start.line + 1,
-                commentFlag: 'line'
+                commentFlag: CommentType.line
               }
               lineCommentArr.push(itemTemp)
             }
@@ -131,7 +141,7 @@ function countCommentForJs(fileContent: string): Promise<CommentItemType[]> {
                 startIndex: start.line,
                 endIndex: end.line,
                 lineCount: line,
-                commentFlag: 'block'
+                commentFlag: CommentType.block
               }
               blockCommentArr.push(itemTemp)
             }
@@ -139,8 +149,10 @@ function countCommentForJs(fileContent: string): Promise<CommentItemType[]> {
         },
       })
 
-      const totalCommentLine = [...lineCommentArr, ...blockCommentArr]
-      resolve(totalCommentLine)
+      const totalComment = [...lineCommentArr, ...blockCommentArr]
+      // 重新生成一个带注释和代码是否在同一行的标识的注释信息数组
+      const newTotalComment = generateCodeWithComment(ast?.program, totalComment, 'js')
+      resolve(newTotalComment)
     } catch (error) {
       reject(error)
     }
@@ -158,7 +170,7 @@ function countCommentForPreCss(fileContent: string): Promise<CommentItemType[]> 
       // 解析不了#{}插值语法，将对应插值内容置为空，不影响
       const newFileContent = fileContent.replace(/#{.*?}/g, '')
       // 将样式代码转为css格式
-      const finalCssCode = await postcss([postcssNested, cssNext]).process(newFileContent, { parser: postcssComment }).css || ''
+      const finalCssCode = await postcss([postcssNested]).process(newFileContent, { parser: postcssComment }).css || ''
       const cssAst = postcss.parse(finalCssCode)
       let cssCommentArr = cssAst.nodes.filter((item: any) => item.type === 'comment')
       const cssOtherNodesArr = cssAst.nodes.filter((item: any) => item.type !== 'comment')
@@ -183,14 +195,32 @@ function countCommentForPreCss(fileContent: string): Promise<CommentItemType[]> 
           startIndex: start.line,
           endIndex: end.line,
           lineCount: line,
-          commentFlag: 'block'
+          commentFlag: CommentType.block
         }
       })
-      resolve(cssCommentArr)
+      // 重新生成一个带注释和代码是否在同一行的标识的注释信息数组
+      const newTotalComment = generateCodeWithComment(cssOtherNodesArr, cssCommentArr, 'css')
+      resolve(newTotalComment)
     } catch (error) {
       reject(error)
     }
   })
+}
+
+// 获取html节点中的注释
+function getHtmlComments(nodes: any = []) {
+  let comments: any[] = [];
+  nodes.forEach((node: any) => {
+    // 注释节点类型
+    if (node.nodeName === '#comment') {
+      comments.push(node);
+    }
+    if (node?.childNodes?.length) {
+      comments = comments.concat(getHtmlComments(node?.childNodes));
+    }
+  });
+
+  return comments;
 }
 
 /**
@@ -201,43 +231,42 @@ function countCommentForPreCss(fileContent: string): Promise<CommentItemType[]> 
 function countCommentForHtml(fileContent: string): Promise<CommentItemType[]> {
   return new Promise((resolve, reject) => {
     try {
-      const fileContentArr = fileContent.split('\n')
-      const htmlAst = htmlParser.parse(fileContent, {
-        comment: true
+      const htmlAst = htmlParser(fileContent, {
+        sourceCodeLocationInfo: true,
       })
-      const htmlEle = htmlAst.childNodes.find((item: any) => +item.nodeType === 1) || {}
-      const headComments = htmlEle?.childNodes?.find((item: any) => item.rawTagName === 'head')?.childNodes?.filter((item: any) => +item.nodeType === 8) || []
-      const bodyComments = htmlEle?.childNodes?.find((item: any) => item.rawTagName === 'body')?.childNodes?.filter((item: any) => +item.nodeType === 8) || []
-      const comments = [...headComments, ...bodyComments]
+      const htmlEle = htmlAst.childNodes.find((item: any) => item.nodeName === 'html') || {}
+      const childNodes = htmlEle?.childNodes.filter((item: any) => item.nodeName === 'body' || item.nodeName === 'head')
+      const comments = getHtmlComments(childNodes) || []
       const lineCommentArr: CommentItemType[] = []
       const blockCommentArr: CommentItemType[] = []
       comments.forEach((item => {
-        const { rawText } = item
-        if (rawText.indexOf('\n') > -1) {
-          const noEmptyCommentArr = rawText.split('\n').filter((textItem: string) => textItem.trim())
-          const startIndex = fileContentArr.findIndex(item => item.indexOf(noEmptyCommentArr[0]) > -1) + 1
-          const endIndex = fileContentArr.findIndex(item => item.indexOf(noEmptyCommentArr[noEmptyCommentArr.length - 1]) > -1) + 1
+        const { data, sourceCodeLocation: {
+          startLine = 0,
+          endLine = 0
+        }} = item
+        if (data.indexOf('\n') > -1) {
+          const noEmptyCommentArr = data.split('\n').filter((textItem: string) => textItem.trim())
           blockCommentArr.push({
             value: noEmptyCommentArr.join('\n'),
             lineCount: noEmptyCommentArr.length,
-            startIndex,
-            endIndex,
-            commentFlag: 'block'
+            commentFlag: CommentType.block,
+            startIndex: startLine,
+            endIndex: endLine,
           })
         } else {
-          const startIndex = fileContentArr.findIndex(item => item.indexOf(rawText) > -1) + 1
-
           lineCommentArr.push({
-            value: rawText,
+            value: data,
             lineCount: 1,
-            startIndex,
-            endIndex: startIndex,
-            commentFlag: 'line'
+            commentFlag: CommentType.line,
+            startIndex: startLine,
+            endIndex: endLine,
           })
         }
       }))
       const totalComments = [...lineCommentArr, ...blockCommentArr]
-      resolve(totalComments)
+      // 重新生成一个带注释和代码是否在同一行的标识的注释信息数组
+      const newTotalComments = generateCodeWithComment(htmlEle, totalComments, 'html')
+      resolve(newTotalComments)
     } catch (error) {
       reject(error)
     }
@@ -263,7 +292,9 @@ function countCommentForVue(fileContent: string): Promise<CommentItemType[]> {
       let lineCommentArr: CommentItemType[] = []
       let blockCommentArr: CommentItemType[] = []
       const templateComments = ast.templateBody?.comments || []
-      templateComments.forEach((item: any) => {
+       // 重新生成一个带注释和代码是否在同一行的标识的注释信息数组
+       const newTemplateComments = generateCodeWithComment(ast?.templateBody?.children || '', templateComments, 'template')
+       newTemplateComments.forEach((item: any) => {
         // 多行注释
         if (item?.value?.indexOf('\n') > -1) {
           blockCommentArr.push(item)
@@ -274,15 +305,16 @@ function countCommentForVue(fileContent: string): Promise<CommentItemType[]> {
 
       // 处理script部分的代码注释
       // 提取script标签里面的代码
-      const scriptRegex = /<script>([\s\S]*?)<\/script>/gmi;
+      const scriptRegex = /<script.*>([\s\S]*?)<\/script>/gmi;
       let scriptMatch;
       let scriptCode = ''
       while ((scriptMatch = scriptRegex.exec(fileContent)) !== null) {
         scriptCode = scriptMatch[1] || '';
       }
+      // console.info(scriptCode, '--scriptCode')
       const scriptComments = (await countCommentForJs(scriptCode)) || []
       scriptComments.forEach(item => {
-        if (item.commentFlag === 'line') {
+        if (item.commentFlag === CommentType.line) {
           lineCommentArr.push(item)
         } else {
           blockCommentArr.push(item)
@@ -299,6 +331,7 @@ function countCommentForVue(fileContent: string): Promise<CommentItemType[]> {
       }
       const styleCodeTemp = styleCode.replace(/<(\/)*style.*>/g, '') // 有可能会存在多个style，所以把style标签置为空
       const finalStyleCode = styleCodeTemp.replace(/<script>([\s\S]*?)<\/script>/g, '')
+      // console.info(finalStyleCode, '--finalStyleCode')
       const cssCommentMsg = (await countCommentForPreCss(finalStyleCode)) || []
       blockCommentArr = [...blockCommentArr, ...(cssCommentMsg || [])]
       // 处理单行注释的数据结构
@@ -313,7 +346,7 @@ function countCommentForVue(fileContent: string): Promise<CommentItemType[]> {
           startIndex: start.line,
           endIndex: end.line,
           lineCount: end.line - start.line + 1,
-          commentFlag: 'line'
+          commentFlag: CommentType.line
         }
       })
       // 处理多行注释的数据结构
@@ -332,11 +365,11 @@ function countCommentForVue(fileContent: string): Promise<CommentItemType[]> {
           startIndex: start.line,
           endIndex: end.line,
           lineCount: line,
-          commentFlag: 'block'
+          commentFlag: CommentType.block
         }
       })
-      const totalCommentLine = [...lineCommentArr, ...blockCommentArr]
-      resolve(totalCommentLine)
+      const totalComments = [...lineCommentArr, ...blockCommentArr]
+      resolve(totalComments)
     } catch (error) {
       reject(error)
     }
@@ -351,31 +384,40 @@ function countCommentForVue(fileContent: string): Promise<CommentItemType[]> {
  */
 function countCommentDensity(filePath: string, options?: OptionsType): Promise<{
   commentDensity: string;
-  comments: CommentItemType[]
+  comments: CommentItemType[];
+  totalCodeLine: number;
 }> {
-  const { onlyAllowZh = true, zhPreNum = 3 } = options || {}
+  const { onlyAllowZh = true, zhPreNum = 3, fileLineThreshold = 500 } = options || {}
+  const computedLLocArr = ['.js', '.ts', 'jsx', 'tsx']
   return new Promise(async (resolve) => {
     try {
       const pathExtName = path.extname(filePath)
       const fileContent = fs.readFileSync(filePath, 'utf-8') || ''
       const comments = await COUNT_COMMENT_DENSITY_MAP[pathExtName](fileContent)
-      const totalCommentLine = comments?.filter((item: any) => {
+      const finalComments = onlyAllowZh ? comments?.filter((item: any) => {
         // 判断对应注释的前x个字符是否包含中文，判定为中文注释
-        return onlyAllowZh ? /[\u4e00-\u9fa5]/.test(item.value.trim().substring(0, zhPreNum)) : true
-      }).reduce((pre: any, next: any) => {
+        return /[\u4e00-\u9fa5]/.test(item.value.trim().substring(0, zhPreNum))
+      }) : comments
+      const totalCommentLine = finalComments.reduce((pre: any, next: any) => {
         return pre + next.lineCount
       }, 0)
+      // 把和代码同一行的注释提取成新的一行，避免有注释密度计算的歧义
+      const codeWithCommentsNum = finalComments.filter((item: any) => item.codeWithCommentFlag).length || 0
       const totalCodeLine = countCodeLine(fileContent)
-      const commentDensity = totalCodeLine ? `${((totalCommentLine / totalCodeLine) * 100).toFixed(2)}%` : '0.00%'
+      // 最终的计算总行数基数（符合指定类型的文件且小于文件行数阈值的使用逻辑行数作为基数，大于文件行数阈值的使用文件行数作为基数）
+      const computedTotalCodeLine = computedLLocArr.includes(pathExtName) && totalCodeLine < fileLineThreshold ? getCodellocLine(fileContent) : totalCodeLine
+      const commentDensity = computedTotalCodeLine ? (totalCommentLine / (computedTotalCodeLine + codeWithCommentsNum)) * 100 : 0
       resolve({
-        commentDensity,
-        comments: commentDensity === '0.00%' ? [] : comments
+        commentDensity: `${Math.min(+commentDensity, 100).toFixed(2)}%`, // 保证在100%的范围内
+        comments: !commentDensity ? [] : finalComments,
+        totalCodeLine
       })
     } catch (error: any) {
       errorObj.push(`${filePath}：${error?.message || ''}`)
       resolve({
-        commentDensity: '0',
-        comments: []
+        commentDensity: '0.00%',
+        comments: [],
+        totalCodeLine: 0
       })
     }
   })
@@ -397,8 +439,6 @@ function getCommentLen(str: string): {
   const enRegex = /^[a-zA-Z\s]+$/; // 匹配英文单词
   const isAllChinese = chRegex.test(strTemp);
   const isAllEnglish = enRegex.test(strTemp);
-  // console.info(isAllChinese, '--isAllCh')
-  // console.info(isAllEnglish, '--isAllEn')
 
   // 针对于纯中文，直接计算字符串长度
   if (isAllChinese) {
@@ -419,6 +459,7 @@ function getCommentLen(str: string): {
     languageFlag = CommentLanguageType.zhen
   }
 
+
   return {
     languageFlag,
     len
@@ -428,14 +469,13 @@ function getCommentLen(str: string): {
 /**
  * 递归遍历文件夹的文件
  * @param dirPath 目标文件夹/文件路径
- * @param skipDir 跳过遍历的目录名称（默认为node_modules）
+ * @param skipDir 跳过遍历的目录名称
  * @returns 目标文件夹下的所有文件
  */
 function recursiveTraversalFiles(
   dirPath: string,
   skipDir?: string[]
 ): string[] {
-  const skipDirTemp = ['node_modules', ...(skipDir || [])]
   const pathExtArr = ['.js', '.jsx', '.ts', '.tsx', '.vue', '.scss', '.sass', '.less', '.html']
   const outPutFileArr: string[] = []
   try {
@@ -446,7 +486,7 @@ function recursiveTraversalFiles(
       const files = fs.readdirSync(dirPath)
       files.forEach((file: string) => {
         // 若是要跳过处理的文件夹，则直接返回，不进行递归或文件处理
-        if (skipDirTemp.findIndex(item => file.indexOf(item) > -1) > -1) {
+        if ((skipDir || []).findIndex(item => file.indexOf(item) > -1) > -1) {
           return;
         }
 
@@ -458,7 +498,7 @@ function recursiveTraversalFiles(
 
         // 如果是目录，则递归调用recursiveTraversalFiles方法
         if (stats.isDirectory()) {
-          outPutFileArr.push(...(recursiveTraversalFiles(filePath, skipDir) || []));
+          outPutFileArr.push(...(recursiveTraversalFiles(filePath, skipDir)));
         } else if (pathExtArr.includes(path.extname(filePath))) {  // 如果是符合处理后缀的文件，则执行回调函数处理文件路径
           outPutFileArr.push(filePath)
         }
@@ -481,16 +521,17 @@ function recursiveTraversalFiles(
  * @returns 项目中每个文件的注释信息
  */
 async function handleToProjectCommentMsg(filePath: string, options?: OptionsType): Promise<CommentMsgType> {
+  const densityMsg = await countCommentDensity(filePath, options)
   const commentMsg: CommentMsgType = {
     filePath,
-    density: '0',
-    lenMsg: []
+    density: densityMsg.commentDensity || '0.00%',
+    lenMsg: [],
+    totalCodeLine: densityMsg.totalCodeLine || 0
   }
-  const density = await countCommentDensity(filePath, options)
-  const comments = density.comments
+  const comments = densityMsg.comments
   comments.forEach(item => {
     const { value, commentFlag, startIndex, endIndex } = item
-    if (commentFlag === 'block') {
+    if (commentFlag === CommentType.block) {
       value.split('\n').forEach(item => {
         const itemTemp = item.replace(/\* | \s*/g, '')
         const commentLen = getCommentLen(itemTemp)
@@ -498,7 +539,8 @@ async function handleToProjectCommentMsg(filePath: string, options?: OptionsType
           ...commentLen,
           startIndex,
           endIndex,
-          commentFlag
+          commentFlag,
+          value: itemTemp
         })
       })
     } else {
@@ -507,12 +549,12 @@ async function handleToProjectCommentMsg(filePath: string, options?: OptionsType
         ...commentLen,
         startIndex,
         endIndex,
-        commentFlag
+        commentFlag,
+        value
       })
     }
   })
 
-  commentMsg.density = density.commentDensity
   return commentMsg
 }
 
@@ -523,10 +565,20 @@ async function handleToProjectCommentMsg(filePath: string, options?: OptionsType
  * @param options.onlyAllowZh 是否只支持注释为中文的标识（默认为true）
  * @param options.zhPreNum 针对于注释中前几位包含中文字符来判定为中文注释（默认为3）
  * @param options.skipDir 跳过遍历的目录名称（默认为node_modules）
+ * @param options.showError 展示错误信息（默认为false）
+ * @param options.fileLineThreshold 文件行数的阈值（计算注释密度时，大于文件阈值以代码行数为基数，小于文件阈值以逻辑行数为基数）（默认为500）
  * @returns
  */
 export async function walk(dirPath: string, options?: OptionsType) {
-  const outPutFileArr = recursiveTraversalFiles(dirPath, options?.skipDir);
+  const { showError = false } = options || {}
+  const ignorePath = path.join(dirPath, '.gitignore')
+  const exitsIgnoreFileFlag = fs.existsSync(ignorePath)
+  // console.info(exitsIgnoreFileFlag, '---exitsIgnoreFileFlag')
+  const ignoreContent = exitsIgnoreFileFlag ? fs.readFileSync(ignorePath)?.toString() : 'node_modules'
+  // 过滤掉ignore文件中的注释内容以及把*替换成空字符
+  const ignoreContentArr = (ignoreContent.split('\n') || []).filter((item: string) => item && item.indexOf('#') === -1).map((item: string) => item.replace(/\*/ig, ''))
+
+  const outPutFileArr = recursiveTraversalFiles(dirPath, [...ignoreContentArr, ...(options?.skipDir || [])]);
   let projectCommentMsg: CommentMsgType[] = []
   for (const filePath of outPutFileArr) {
     const fileCommentMsg = await handleToProjectCommentMsg(filePath, options);
@@ -534,5 +586,8 @@ export async function walk(dirPath: string, options?: OptionsType) {
   }
   projectCommentMsg = projectCommentMsg.sort((a, b) => +(b.density.slice(0, -1)) - +(a.density.slice(0, -1)))
 
-  return projectCommentMsg
+  return showError ? {
+    projectCommentMsg,
+    errorMsg: errorObj
+  } : projectCommentMsg
 }
