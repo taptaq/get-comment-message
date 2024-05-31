@@ -1,7 +1,7 @@
 {
   "name": "get-comment-message",
   "version": "2.0.1",
-  "description": "",
+  "description": "计算代码注释密度/长度的相关信息",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
