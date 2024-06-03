@@ -171,6 +171,7 @@ function countCommentForPreCss(fileContent: string): Promise<CommentItemType[]> 
       const newFileContent = fileContent.replace(/#{.*?}/g, '')
       // 将样式代码转为css格式
       const finalCssCode = await postcss([postcssNested]).process(newFileContent, { parser: postcssComment }).css || ''
+      // console.info(finalCssCode, '--finalCssCode')
       const cssAst = postcss.parse(finalCssCode)
       let cssCommentArr = cssAst.nodes.filter((item: any) => item.type === 'comment')
       const cssOtherNodesArr = cssAst.nodes.filter((item: any) => item.type !== 'comment')
@@ -589,5 +590,7 @@ export async function walk(dirPath: string, options?: OptionsType) {
   return showError ? {
     projectCommentMsg,
     errorMsg: errorObj
-  } : projectCommentMsg
+  } : {
+    projectCommentMsg
+  }
 }
