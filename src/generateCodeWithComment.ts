@@ -13,6 +13,7 @@ const findJsCodeLineNums = (nodes: any): number[] => {
       const node = path.node;
       if (node.leadingComments || node.innerComments || node.trailingComments || (node.type !== 'CommentLine' && node.type !== 'CommentBlock')) {
         lines.push(node?.loc?.start?.line || 0);
+        lines.push(node?.loc?.end?.line || 0);
       }
     }
   });
@@ -28,9 +29,11 @@ const findCssCodeLineNums = (nodes: any[]): number[] => {
   
   let lines: number[] = [];
   nodes.forEach(node => {
-    const line = node?.source?.start?.line
-    if ((node.type === 'decl' || node.type === 'rule') && line !== undefined) {
-      lines.push(line);
+    const startLine = node?.source?.start?.line
+    const endLine = node?.source?.end?.line
+    if ((node.type === 'decl' || node.type === 'rule') && startLine !== undefined && endLine !== undefined) {
+      lines.push(startLine);
+      lines.push(endLine);
     }
     if (node?.nodes?.length) {
       lines = lines.concat(findCssCodeLineNums(node.nodes));
@@ -46,15 +49,18 @@ const findCssCodeLineNums = (nodes: any[]): number[] => {
  */
 const findHtmlCodeLineNums = (nodes: any): number[] => {
   if (!nodes) return []
-  let lines: number[] = [nodes?.sourceCodeLocation?.startLine];
+  let lines: number[] = [nodes?.sourceCodeLocation?.startLine, nodes?.sourceCodeLocation?.endLine];
   nodes?.childNodes?.forEach((node: any) => {
     const { sourceCodeLocation: {
-      startLine = 0
-    } = {}, value = '' } = node;
-    const noEmptyValueFlag = !!(node.nodeName === '#text' && value?.trim().split('\n').filter((item: string) => item).length)
-    const line = noEmptyValueFlag && value.startsWith('\n') ? startLine + 1 : startLine
-    if (node.nodeName !== '#comment' && (noEmptyValueFlag || node.nodeName !== '#text') && (line !== undefined || !isNaN(line))) {
-      lines.push(line);
+      startLine = 0,
+      endLine = 0
+    } = {}, value = '', nodeName = '' } = node;
+    const noEmptyValueFlag = !!(nodeName === '#text' && value?.trim().split('\n').filter((item: string) => item).length)
+    const startLineTemp = noEmptyValueFlag && value.startsWith('\n') ? startLine + 1 : startLine
+    if (nodeName !== '#comment' && (noEmptyValueFlag || nodeName !== '#text') && (startLineTemp !== undefined || !isNaN(startLineTemp)) && endLine !== undefined) {
+      lines.push(startLineTemp);
+      // 不是文本节点的才把endLine添加进来，以防被该节点后续的空内容扰乱
+      nodeName !== '#text' && lines.push(endLine);
     }
     if (node?.childNodes?.length) {
       lines = lines.concat(findHtmlCodeLineNums(node));
@@ -77,14 +83,19 @@ const findTemplateCodeLineNums = (nodes: any): number[] => {
       type = '',
       loc: {
         start: {
-          line = 0
+          line: startLine = 0,
+        } = {},
+        end: {
+          line: endLine = 0,
         } = {}
       } = {}
     } = node
     const noEmptyValueFlag = !!(type === 'VText' && value?.trim().split('\n').filter((item: string) => item).length)
-    const lineTemp = noEmptyValueFlag && value.startsWith('\n') ? line + 1 : line
-    if ((noEmptyValueFlag || type !== 'VText') && (lineTemp !== undefined || !isNaN(lineTemp))) {
-      lines.push(lineTemp);
+    const startLineTemp = noEmptyValueFlag && value.startsWith('\n') ? startLine + 1 : startLine
+    if ((noEmptyValueFlag || type !== 'VText') && (startLineTemp !== undefined || !isNaN(startLineTemp)) && endLine !== undefined) {
+      lines.push(startLineTemp);
+      // 不是文本节点的才把endLine添加进来，以防被该节点后续的空内容扰乱
+      type !== 'VText' && lines.push(endLine);
     }
     if (node?.children?.length) {
       lines = lines.concat(findTemplateCodeLineNums(node?.children));
