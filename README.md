@@ -32,18 +32,20 @@ walk(path, [options])
 ```js
 // 不展示错误信息时
 {
-  filePath: 检测的文件路径,
-  density: 注释密度,
-  lenMsg: {
-    languageFlag: 注释语言类型：zh | en | zhen,
-    len: 注释长度,
-    startIndex: 注释开始位置,
-    endIndex: 注释结束位置,
-    commentFlag: 注释类型：line | block,
-    value: 注释内容,
-  },
-  totalCodeLine: 总代码行数
-}[]
+  projectCommentMsg: {
+    filePath: 检测的文件路径,
+    density: 注释密度,
+    lenMsg: {
+      languageFlag: 注释语言类型：zh | en | zhen,
+      len: 注释长度,
+      startIndex: 注释开始位置,
+      endIndex: 注释结束位置,
+      commentFlag: 注释类型：line | block,
+      value: 注释内容,
+    },
+    totalCodeLine: 总代码行数
+  }[]
+}
 
 // 展示错误信息时
 {
