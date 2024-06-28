@@ -1,4 +1,5 @@
 const parser = require('@babel/parser');
+const { parse: vueParser } = require('vue-eslint-parser')
 const traverse = require('@babel/traverse').default
 
 // 各节点类型的逻辑行数值映射对象
@@ -38,14 +39,24 @@ const SYNTAX_BABYLON_LLOC_MAP: {
   YieldExpression: 1 // parent.type !== 'ExpressionStatement' ? 1 : 0;
 }
 
+// 各节点类型的逻辑行数值映射对象（针对于vue模块）
+const SYNTAX_BABYLON_LLOC_MAP_VUE: {
+  [key: string]: number;
+} = {
+  'if': 1,
+  'else-if': 1,
+  'else': 1,
+  'for': 1,
+  'show': 1
+}
+
+
 /**
  * 获取目标节点的逻辑行数值
  * @param node 目标节点
  * @param parentNode 目标父级节点
  */
 const getSyntaxBabylonLloc = (node: any, parentNode: any) => {
-  // const exportConfigurationNode = ['ExportAllDeclaration', 'ExportDefaultDeclaration', 'ExportNamedDeclaration', 'ImportDeclaration']
-  // const { esmImportExport = false, templateExpression = false } = options || {}
   let lloc = 0
   const { type = '' } = node
   const { type: parentType = '' } = parentNode
@@ -69,22 +80,59 @@ const getSyntaxBabylonLloc = (node: any, parentNode: any) => {
 }
 
 /**
+ * 获取Vue代码文件中template的逻辑行数
+ * @param ast
+ */
+const getCodellocLineForVueTemplate = (templateChildren: any[]): number => {
+  let llocSum = 0
+  templateChildren?.forEach((node: any) => {
+    const {
+      type = '',
+      startTag = {
+        attributes: []
+      },
+      children = []
+    } = node
+    if (type === 'VElement') {
+      const VDirectiveAttrArr = startTag?.attributes?.filter((item: any) => item.key.type === 'VDirectiveKey') || []
+      VDirectiveAttrArr.forEach((attrItem: any) => {
+        llocSum += SYNTAX_BABYLON_LLOC_MAP_VUE[attrItem?.key?.name?.name || ''] || 0
+      })
+    }
+    if (children?.length) {
+      llocSum += getCodellocLineForVueTemplate(node?.children);
+    }
+  });
+  return llocSum
+}
+
+/**
  * 获取代码文件的逻辑行数
  * @param fileContent 文件内容
+ * @param fileType 文件类型
  */
-const getCodellocline = (fileContent: string): number => {
-  const ast = parser.parse(fileContent, {
-    sourceType: 'module',
-    plugins: ['jsx', 'typescript'],
-  })
+const getCodellocline = (fileContent = '', fileType: 'js' | 'vue' = 'js'): number => {
+  if (!fileContent) return 0
   let llocSum = 0
-  traverse(ast, {
-    enter(path: any) {
-      const { node, parent } = path
-      llocSum += getSyntaxBabylonLloc(node, parent)
-    }
-  })
-  return llocSum
+  if (fileType === 'js') {
+    const ast = parser.parse(fileContent, {
+      sourceType: 'module',
+      plugins: ['jsx', 'typescript', 'decorators'],
+    })
+    traverse(ast, {
+      enter(path: any) {
+        const { node, parent } = path
+        llocSum += getSyntaxBabylonLloc(node, parent)
+      }
+    })
+  } else {
+    const templateAst = vueParser(fileContent, {
+      sourceType: 'module',
+    })
+    llocSum = getCodellocLineForVueTemplate(templateAst?.templateBody?.children || [])
+  }
+
+  return llocSum || 0
 }
 
 export default getCodellocline
