@@ -64,7 +64,8 @@ interface OptionsType {
   filterFileByCodeLineMsg?: {
     codeLineType: 'totalCodeLine' | 'logicalLine',
     codeLineThreshold: number;
-  }
+  },
+  ignoreNodeModules?: boolean
 }
 
 // 符合获取逻辑行数的文件类型数组
@@ -431,8 +432,8 @@ function countCommentDensity(filePath: string, options?: OptionsType): Promise<{
       const codeWithCommentsNum = finalComments.filter((item: any) => item.codeWithCommentFlag).length || 0
       const totalCodeLine = countCodeLine(fileContent)
       // 需要获取逻辑行数的标识
-      const getCodellocLineFlag = computedLLocPathExtNameArr.includes(pathExtName) && totalCodeLine < fileLineThreshold
-      // 最终的计算总行数基数（符合指定类型的文件且小于文件行数阈值的使用逻辑行数作为基数，大于文件行数阈值的使用文件行数作为基数）
+      const getCodellocLineFlag = computedLLocPathExtNameArr.includes(pathExtName) && totalCodeLine <= fileLineThreshold
+      // 最终的计算总行数基数（符合指定类型的文件且小于等于文件行数阈值的使用逻辑行数作为基数，大于文件行数阈值的使用文件行数作为基数）
       const computedTotalCodeLine = getCodellocLineFlag ?
         pathExtName === '.vue' ?
           (getCodellocLine(getSrciptCode(fileContent)) + getCodellocLine(getTemplateCode(fileContent), 'vue')) || 0
@@ -440,7 +441,7 @@ function countCommentDensity(filePath: string, options?: OptionsType): Promise<{
         : totalCodeLine
       const commentDensity = computedTotalCodeLine ? (totalCommentLine / (computedTotalCodeLine + codeWithCommentsNum)) * 100 : 0
       resolve({
-        commentDensity: `${Math.min(+commentDensity, 100).toFixed(2)}%`, // 保证在100%的范围内
+        commentDensity: `${Math.min(+commentDensity, 100)?.toFixed(2) || '0.00'}%`, // 保证在100%的范围内
         comments: !commentDensity ? [] : finalComments,
         totalCodeLine,
         logicalLine: computedLLocPathExtNameArr.includes(pathExtName) ?
@@ -529,13 +530,13 @@ function recursiveTraversalFiles(
     if (targetPathDirFlag) {
       const files = fs.readdirSync(dirPath)
       files.forEach((file: string) => {
+        // 获取当前文件或文件夹的完整路径
+        const filePath = path.join(dirPath, file);
         // 若是要跳过处理的文件夹，则直接返回，不进行递归或文件处理
-        if ((skipDir || []).findIndex(item => file.indexOf(item) > -1) > -1) {
+        if ((skipDir || []).findIndex(item => filePath.indexOf(item) > -1) > -1) {
           return;
         }
 
-        // 获取当前文件或文件夹的完整路径
-        const filePath = path.join(dirPath, file);
         // 使用fs.stat来检查当前项是文件还是目录
         const stats = fs.statSync(filePath);
         const isDirectory = stats.isDirectory()
@@ -544,7 +545,10 @@ function recursiveTraversalFiles(
         // 根据指定的代码行数过滤信息的阈值去跳过文件的处理
         if (Object.keys(filterFileByCodeLineMsg || {}).length && !isDirectory) {
           const fileContent = fs.readFileSync(filePath, 'utf-8') || ''
-          const targetCodeLine = filterFileByCodeLineMsg?.codeLineType === 'logicalLine' && computedLLocPathExtNameArr.includes(pathExt) ? getCodellocLine(pathExt === '.vue' ? getSrciptCode(fileContent) : fileContent) : countCodeLine(fileContent)
+          const targetCodeLine = filterFileByCodeLineMsg?.codeLineType === 'logicalLine' && computedLLocPathExtNameArr.includes(pathExt) ? pathExt === '.vue' ?
+            (getCodellocLine(getSrciptCode(fileContent)) + getCodellocLine(getTemplateCode(fileContent), 'vue'))
+            : getCodellocLine(fileContent)
+          : countCodeLine(fileContent)
           skipByCodeLineFlag = !!(targetCodeLine < (filterFileByCodeLineMsg?.codeLineThreshold || 0))
         }
         if (skipByCodeLineFlag) {
@@ -627,19 +631,23 @@ async function handleToProjectCommentMsg(filePath: string, options?: OptionsType
  * @param options.filterFileByCodeLineMsg 代码行数过滤对象
  * @param options.filterFileByCodeLineMsg.codeLineType 判断这个过滤是以实际代码行数为条件还是以逻辑行数为条件（目标文件一旦超过下面设置的行数阈值将过滤不计算）
  * @param options.filterFileByCodeLineMsg.codeLineThreshold 行数阈值
+ * @param options.ignoreNodeModules 忽略对node_modules的过滤
  * @returns
  */
 export async function walk(dirPath: string, options?: OptionsType) {
   const {
     showError = false,
     ignoreCss = true,
-    filterFileByCodeLineMsg = ({} as any) } = options || {}
+    filterFileByCodeLineMsg = ({} as any),
+    ignoreNodeModules = true
+  } = options || {}
   const ignorePath = path.join(dirPath, '.gitignore')
   const exitsIgnoreFileFlag = fs.existsSync(ignorePath)
   // console.info(exitsIgnoreFileFlag, '---exitsIgnoreFileFlag')
   const ignoreContent = exitsIgnoreFileFlag ? fs.readFileSync(ignorePath)?.toString() : 'node_modules'
+  const finalIgnoreContent = ignoreNodeModules ? ignoreContent.split('\n') : ignoreContent.split('\n').filter((item: string) => item.indexOf('node_modules') === -1)
   // 过滤掉ignore文件中的注释内容以及把*替换成空字符
-  const ignoreContentArr = (ignoreContent.split('\n') || []).filter((item: string) => item && item.indexOf('#') === -1).map((item: string) => item.replace(/\*/ig, ''))
+  const ignoreContentArr = (finalIgnoreContent || []).filter((item: string) => item && item.indexOf('#') === -1).map((item: string) => item.replace(/\*/ig, ''))
 
   const cssFilePath = ignoreCss ? ['.css', '.less', '.scss', '.sass'] : []
 
