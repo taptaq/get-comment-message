@@ -10,6 +10,7 @@ const fs = require('fs')
 const path = require('path')
 const generateCodeWithComment = require('./generateCodeWithComment').default
 const getCodellocLine = require('./getCodellocLine').default
+const getFunlloc = require('./getFunlloc').default
 
 enum CommentType {
   'line' = 'line',
@@ -52,6 +53,7 @@ interface CommentMsgType {
   totalCodeLine: number;
   logicalLine: number;
   totalCommentLine: number;
+  funLLocMsg: FunllocItemType[]
 }
 
 interface OptionsType {
@@ -64,8 +66,9 @@ interface OptionsType {
   filterFileByCodeLineMsg?: {
     codeLineType: 'totalCodeLine' | 'logicalLine',
     codeLineThreshold: number;
-  },
-  ignoreNodeModules?: boolean
+  };
+  ignoreNodeModules?: boolean;
+  fnLineThreshold?: number;
 }
 
 // 符合获取逻辑行数的文件类型数组
@@ -402,6 +405,46 @@ function countCommentForVue(fileContent = ''): Promise<CommentItemType[]> {
   })
 }
 
+// 根据是否有中文标识获取最终的注释对象
+const getFinalCommentsWhetherZh = (onlyAllowZh: boolean, comments: CommentItemType[], zhPreNum: number) => {
+  return onlyAllowZh ? comments?.filter((item: any) => {
+    // 判断对应注释的前x个字符是否包含中文，判定为中文注释
+    return /[\u4e00-\u9fa5]/.test(item.value.trim().substring(0, zhPreNum))
+  }) : comments
+}
+
+// 获取总注释函数
+const getTotalCommentLine = (comments: CommentItemType[]) => {
+  return comments.reduce((pre: any, next: any) => {
+    return pre + (next.lineCount || 0)
+  }, 0)
+}
+
+// 获取最终的各函数注释情况
+const getFinalFunLLocMsg = (fileContent: string, onlyAllowZh: boolean, zhPreNum: number, fnLineThreshold: number): Promise<FunllocItemType[]> => {
+  return new Promise(async (resolve, reject) => {
+    try {
+      const funllocMsg = (await getFunlloc(fileContent, fnLineThreshold) || [])?.map(async (item: any) => {
+        const comments = await countCommentForJs(item.code)
+        const finalComments = getFinalCommentsWhetherZh(onlyAllowZh, comments, zhPreNum)
+        const totalCommentLine = getTotalCommentLine(finalComments)
+        const codeWithCommentsNum = finalComments.filter((item: any) => item.codeWithCommentFlag).length || 0
+        const computedTotalCodeLine = item.lloc + codeWithCommentsNum
+        const commentDensity = computedTotalCodeLine ? (totalCommentLine / computedTotalCodeLine) * 100 : 0
+        return {
+          ...item,
+          comments: finalComments,
+          commentDensity: `${(commentDensity > 100 ? 100 : commentDensity)?.toFixed(2)}%`
+        }
+      })
+      const finalFunllocMsg = await Promise.all(funllocMsg)
+      resolve(finalFunllocMsg)
+    } catch (error) {
+      reject(error)
+    }
+  })
+}
+
 /**
  * 计算注释密度
  * @param filePath 处理的目标文件路径
@@ -414,20 +457,17 @@ function countCommentDensity(filePath: string, options?: OptionsType): Promise<{
   totalCodeLine: number;
   logicalLine: number;
   totalCommentLine: number;
+  funLLocMsg: FunllocItemType[]
 }> {
-  const { onlyAllowZh = true, zhPreNum = 3, fileLineThreshold = 500 } = options || {}
+  const { onlyAllowZh = true, zhPreNum = 3, fileLineThreshold = 500, fnLineThreshold = 15 } = options || {}
   return new Promise(async (resolve) => {
     try {
       const pathExtName = path.extname(filePath)
       const fileContent = fs.readFileSync(filePath, 'utf-8') || ''
+      const funLLocMsg = computedLLocPathExtNameArr.includes(pathExtName) ? await getFinalFunLLocMsg(pathExtName === ".vue" ? getSrciptCode(fileContent) : fileContent, onlyAllowZh, zhPreNum, fnLineThreshold) : []
       const comments = (await COUNT_COMMENT_DENSITY_MAP[pathExtName](fileContent)) || []
-      const finalComments = onlyAllowZh ? comments?.filter((item: any) => {
-        // 判断对应注释的前x个字符是否包含中文，判定为中文注释
-        return /[\u4e00-\u9fa5]/.test(item.value.trim().substring(0, zhPreNum))
-      }) : comments
-      const totalCommentLine = finalComments.reduce((pre: any, next: any) => {
-        return pre + (next.lineCount || 0)
-      }, 0)
+      const finalComments = getFinalCommentsWhetherZh(onlyAllowZh, comments, zhPreNum)
+      const totalCommentLine = getTotalCommentLine(finalComments)
       // 把和代码同一行的注释提取成新的一行，避免有注释密度计算的歧义
       const codeWithCommentsNum = finalComments.filter((item: any) => item.codeWithCommentFlag).length || 0
       const totalCodeLine = countCodeLine(fileContent)
@@ -449,7 +489,8 @@ function countCommentDensity(filePath: string, options?: OptionsType): Promise<{
             (getCodellocLine(getSrciptCode(fileContent)) + getCodellocLine(getTemplateCode(fileContent), 'vue')) || 0
             : getCodellocLine(fileContent)
           : 0,
-        totalCommentLine
+        totalCommentLine,
+        funLLocMsg
       })
     } catch (error: any) {
       errorObj.push(`${filePath}：${error?.message || ''}`)
@@ -458,7 +499,8 @@ function countCommentDensity(filePath: string, options?: OptionsType): Promise<{
         comments: [],
         totalCodeLine: 0,
         logicalLine: 0,
-        totalCommentLine: 0
+        totalCommentLine: 0,
+        funLLocMsg: []
       })
     }
   })
@@ -580,14 +622,22 @@ function recursiveTraversalFiles(
  * @returns 项目中每个文件的注释信息
  */
 async function handleToProjectCommentMsg(filePath: string, options?: OptionsType): Promise<CommentMsgType> {
-  const { commentDensity, totalCodeLine = 0, logicalLine = 0, totalCommentLine = 0, comments = [] } = await countCommentDensity(filePath, options)
+  const {
+    commentDensity,
+    totalCodeLine = 0,
+    logicalLine = 0,
+    totalCommentLine = 0,
+    comments = [],
+    funLLocMsg = []
+  } = await countCommentDensity(filePath, options)
   const commentMsg: CommentMsgType = {
     filePath,
     density: commentDensity || '0.00%',
     lenMsg: [],
     totalCodeLine,
     logicalLine,
-    totalCommentLine
+    totalCommentLine,
+    funLLocMsg,
   }
   comments.forEach(item => {
     const { value, commentFlag, startIndex, endIndex } = item
